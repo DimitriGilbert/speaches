@@ -16,6 +16,7 @@ from pydantic import BaseModel, computed_field
 
 from speaches.api_types import OPENAI_SUPPORTED_SPEECH_VOICE_NAMES, Model
 from speaches.audio import Audio
+from speaches.executors.chatterbox import CLONE_VOICES_DIR
 from speaches.executors.kokoro import normalize_text_for_tts, split_text_into_chunks
 from speaches.executors.shared.base_model_manager import BaseModelManager
 from speaches.hf_utils import HfModelFilter, get_cached_model_repos_info
@@ -78,6 +79,7 @@ except ImportError:
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+    from pathlib import Path
 
     from speaches.executors.shared.handler_protocol import SpeechRequest, SpeechResponse
 
@@ -86,6 +88,7 @@ logger = logging.getLogger(__name__)
 TASK_NAME_TAG = "text-to-speech"
 _VARIANT_CUSTOM = "custom_voice"
 _VARIANT_DESIGN = "voice_design"
+_VARIANT_BASE = "base"
 
 _CUSTOM_VOICE_MODEL_IDS = frozenset(
     {
@@ -94,7 +97,15 @@ _CUSTOM_VOICE_MODEL_IDS = frozenset(
     }
 )
 _VOICE_DESIGN_MODEL_IDS = frozenset({"Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"})
-SUPPORTED_MODEL_IDS = _CUSTOM_VOICE_MODEL_IDS | _VOICE_DESIGN_MODEL_IDS
+# Base variants support zero-shot voice cloning from a user-supplied reference
+# clip (no preset speakers) — the same CLONE_VOICES_DIR used by f5/chatterbox.
+_BASE_MODEL_IDS = frozenset(
+    {
+        "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    }
+)
+SUPPORTED_MODEL_IDS = _CUSTOM_VOICE_MODEL_IDS | _VOICE_DESIGN_MODEL_IDS | _BASE_MODEL_IDS
 
 # Preset speakers on the CustomVoice variants, mapped to their native language
 # (https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice#supported-speakers).
@@ -140,8 +151,28 @@ def _variant_for(model_id: str) -> str:
         return _VARIANT_CUSTOM
     if model_id in _VOICE_DESIGN_MODEL_IDS:
         return _VARIANT_DESIGN
+    if model_id in _BASE_MODEL_IDS:
+        return _VARIANT_BASE
     msg = f"Unsupported Qwen3-TTS model id: {model_id!r}"
     raise ValueError(msg)
+
+
+# Resolves a user clone voice id (e.g. "didi_0") to its .wav path under
+# CLONE_VOICES_DIR, mirroring the chatterbox/f5 executors. Returns None if the
+# voice has no uploaded sample.
+def _clone_path_for_voice(voice: str) -> Path | None:
+    clone_path = CLONE_VOICES_DIR / f"{voice}.wav"
+    if clone_path.exists():
+        return clone_path
+    return None
+
+
+def _clone_voices() -> list[Qwen3TTSModelVoice]:
+    return (
+        [Qwen3TTSModelVoice(name=f.stem) for f in sorted(CLONE_VOICES_DIR.glob("*.wav"))]
+        if CLONE_VOICES_DIR.exists()
+        else []
+    )
 
 
 # Generation kwargs — aligned with upstream's own FAQ stability recipe
@@ -218,6 +249,15 @@ def _apply_mistral_regex_fix(tokenizer: Any) -> bool:
 
 
 def _build_model_info(model_id: str) -> Qwen3TTSModelInfo:
+    variant = _variant_for(model_id)
+    if variant == _VARIANT_CUSTOM:
+        voices = _CUSTOM_VOICE_VOICES
+    elif variant == _VARIANT_BASE:
+        # Base variants are clone-only (no preset speakers); voices come from
+        # the user's uploaded clone samples.
+        voices = _clone_voices()
+    else:
+        voices = []
     return Qwen3TTSModelInfo(
         id=model_id,
         created=0,
@@ -225,7 +265,7 @@ def _build_model_info(model_id: str) -> Qwen3TTSModelInfo:
         language=_SUPPORTED_LANGUAGES,
         task=TASK_NAME_TAG,
         sample_rate=24000,
-        voices=_CUSTOM_VOICE_VOICES if model_id in _CUSTOM_VOICE_MODEL_IDS else [],
+        voices=voices,
     )
 
 
@@ -349,6 +389,8 @@ if QWEN3_TTS_AVAILABLE:
             for attempt in range(_MAX_RETRIES + 1):
                 if state.variant == _VARIANT_CUSTOM:
                     wavs, sr = self._gen_custom_voice(state.model, text, voice)
+                elif state.variant == _VARIANT_BASE:
+                    wavs, sr = self._gen_base_clone(state.model, text, voice)
                 else:
                     wavs, sr = self._gen_voice_design(state.model, text, voice)
                 last_wavs, last_sr = wavs, sr
@@ -385,6 +427,23 @@ if QWEN3_TTS_AVAILABLE:
                 else self.default_design_instruct
             )
             return model.generate_voice_design(text=text, language="Auto", instruct=instruct, **_GEN_KWARGS)
+
+        def _gen_base_clone(self, model: Any, text: str, voice: str) -> tuple[list, int]:
+            # Base variants are clone-only: `voice` is a user-uploaded clone id
+            # resolved to a .wav under CLONE_VOICES_DIR. Unlike CSM, Qwen's clone
+            # does not require a transcript — ref_text="" lets the model infer it.
+            # Do NOT call _resolve_speaker here; that helper is CustomVoice-only.
+            clone_path = _clone_path_for_voice(voice)
+            if clone_path is None:
+                msg = f"Voice {voice!r} is not supported. Qwen3-TTS Base is clone-only: upload a voice sample first."
+                raise ValueError(msg)
+            return model.generate_voice_clone(
+                text=text,
+                language="Auto",
+                ref_audio=str(clone_path),
+                ref_text="",
+                **_GEN_KWARGS,
+            )
 
         def _resolve_speaker(self, voice: str) -> str:
             if voice in _CUSTOM_VOICE_LANGUAGES:
