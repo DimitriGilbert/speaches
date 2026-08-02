@@ -57,6 +57,9 @@ from speaches.routers.stt import (
 from speaches.routers.vad import (
     router as vad_router,
 )
+from speaches.routers.voices import (
+    router as voices_router,
+)
 from speaches.utils import APIProxyError, CudaOutOfMemoryError
 
 if TYPE_CHECKING:
@@ -286,6 +289,7 @@ def create_app() -> FastAPI:
     app.include_router(speech_router, dependencies=http_dependencies)
     app.include_router(speech_embedding_router, dependencies=http_dependencies)
     app.include_router(vad_router, dependencies=http_dependencies)
+    app.include_router(voices_router, dependencies=http_dependencies)
     app.include_router(diarization_router, dependencies=http_dependencies)
 
     app.include_router(realtime_ws_router)
