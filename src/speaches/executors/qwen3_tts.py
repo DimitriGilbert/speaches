@@ -81,7 +81,14 @@ try:
             "(transformers < 5.x; the mistral-regex bug is absent there)."
         )
 
-    from qwen_tts import Qwen3TTSModel
+    # Lazy import: probe for qwen_tts via metadata only (no module execution) so
+    # the ~400 MB model-definition codebase is not pulled into RSS at process
+    # startup. The heavy `from qwen_tts import Qwen3TTSModel` is deferred to
+    # `_load_fn`, which runs only when a Qwen model is actually loaded.
+    import importlib.util
+
+    if importlib.util.find_spec("qwen_tts") is None:
+        raise ImportError("qwen_tts not installed")
 
     QWEN3_TTS_AVAILABLE = True
 except ImportError:
@@ -350,6 +357,7 @@ if QWEN3_TTS_AVAILABLE:
             self._inference_lock = threading.Lock()
 
         def _load_fn(self, model_id: str) -> Qwen3TTSLoadedModel:
+            from qwen_tts import Qwen3TTSModel  # lazy: only imported when a model actually loads
             import torch as _torch
 
             variant = _variant_for(model_id)
