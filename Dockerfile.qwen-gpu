@@ -67,37 +67,10 @@ RUN mkdir -p $HOME/.cache/huggingface/hub
 # root, so pre-create it as ubuntu to avoid PermissionError on upload.
 # (chatterbox reads ~/.cache/speaches/voices/*.wav as clone voices.)
 RUN mkdir -p $HOME/.cache/speaches/voices
-# ---- Replace CPU torch with the ROCm build (gfx9 iGPU support) ----
-# The base uv sync installs CPU torch from the lock; for the GPU image we
-# force-reinstall the ROCm wheel. torch==2.6.0+rocm6.2.4 satisfies
-# chatterbox-tts's torch==2.6.0 pin (local versions satisfy ==). The ROCm
-# build exposes the iGPU via torch.cuda (ROCm mirrors the CUDA API). The
-# wheel bundles the ROCm 6.2.4 runtime, which is forward-compatible with the
-# host's 7.1.x runtime at the ABI level (the amdgpu kernel driver is what
-# actually matters and is loaded). HSA_OVERRIDE_GFX_VERSION=9.0.0 (set in
-# the ENV below and the compose env) makes the runtime expose the Barcelo
-# gfx900 iGPU — the wheel ships gfx9 kernels (gfx900/906/908/90a). Placed
-# BEFORE the chatterbox layer so subsequent installs see the ROCm torch.
-RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
-    uv pip install --python /home/ubuntu/speaches/.venv/bin/python \
-        --force-reinstall \
-        --index-url https://download.pytorch.org/whl/rocm6.2.4 \
-        "torch==2.6.0" "torchaudio==2.6.0"
-# ---- Chatterbox executor: install chatterbox-tts on top of the ROCm torch ----
-# Why a separate `uv pip install` instead of `uv sync --group chatterbox`:
-# `chatterbox-tts==0.1.7` hard-pins `torch==2.6.0` and `torchaudio==2.6.0`, while a core
-# dependency, `pyannote-audio>=4.0.3`, requires `torch>=2.8.0`. Those two pins are mutually
-# exclusive in uv's project resolver, so `uv sync --group chatterbox` FAILS at lock/resolution
-# time. To work around this we install into the already-built venv with `uv pip install`
-# (pip-compatibility mode), which ignores the project lock and `[tool.uv]` overrides and lets
-# torch stay at the ROCm 2.6.0 we just installed. pyannote-audio remains installed from the
-# base sync; its torch>=2.8 pin is metadata only and runs fine on torch 2.6.0 for the TTS-only
-# clone flow (speaker diarization is not used here).
-#
-# chatterbox-tts is installed from PyPI. Note we do NOT pass the PyTorch index here: the
-# ROCm torch/torchaudio are already in the venv from the replacement layer above, and uv pip
-# leaves them in place since chatterbox-tts's `torch==2.6.0` pin is satisfied by
-# `torch==2.6.0+rocm6.2.4` (local versions satisfy ==).
+# ---- Chatterbox executor: install chatterbox-tts ----
+# Note: chatterbox-tts pulls pyannote-audio which requires torch>=2.8, so the
+# CPU/CUDA torch 2.8 lands here temporarily. The ROCm torch is force-installed
+# LAST (see the final install layer below) so nothing re-resolves it away.
 RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
     uv pip install --python /home/ubuntu/speaches/.venv/bin/python \
         "chatterbox-tts==0.1.7"
@@ -117,6 +90,21 @@ RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
 RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
     uv pip install --python /home/ubuntu/speaches/.venv/bin/python \
         --force-reinstall "transformers==4.57.3" "qwen-tts==0.1.1"
+# ---- Replace CPU/CUDA torch with the ROCm build (gfx9 iGPU support) ----
+# MUST be the final install layer: chatterbox/f5/qwen drag in torch>=2.8 (CUDA
+# build) via their deps (pyannote-audio etc.). Installing the ROCm wheel last
+# with --force-reinstall overwrites that with torch==2.6.0+rocm6.2.4, which
+# satisfies chatterbox-tts's torch==2.6.0 pin (local versions satisfy ==).
+# The ROCm build exposes the iGPU via torch.cuda (ROCm mirrors the CUDA API).
+# The wheel bundles the ROCm 6.2.4 runtime, forward-compatible with the host's
+# 7.1.x at ABI level (the amdgpu kernel driver is what matters; loaded).
+# HSA_OVERRIDE_GFX_VERSION=9.0.0 (ENV below + compose) maps the Barcelo gfx900
+# iGPU onto the shipped gfx9 kernels (gfx900/906/908/90a).
+RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
+    uv pip install --python /home/ubuntu/speaches/.venv/bin/python \
+        --force-reinstall \
+        --index-url https://download.pytorch.org/whl/rocm6.2.4 \
+        "torch==2.6.0" "torchaudio==2.6.0"
 # Keep a short TTS_MODEL_TTL: the chatterbox models are ~2-3 GB resident, and
 # this is a shared devbox (don't hog RAM when idle). The ~7-8s reload on a cold
 # Generate is the trade-off; torch threads are pinned (see chatterbox.py) so the
