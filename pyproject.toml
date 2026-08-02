@@ -78,6 +78,9 @@ test = [
 chatterbox = [
     "chatterbox-tts",
 ]
+f5 = [
+    "f5-tts",
+]
 
 [build-system]
 requires = ["hatchling"]

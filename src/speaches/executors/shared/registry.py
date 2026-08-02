@@ -71,6 +71,18 @@ try:
 except ImportError:
     pass
 
+F5_TTS_AVAILABLE = False
+try:
+    from speaches.executors.f5_tts import (
+        F5ModelManager,
+        F5ModelRegistry,
+        f5_model_registry,
+    )
+
+    F5_TTS_AVAILABLE = True
+except ImportError:
+    pass
+
 from speaches.executors.silero_vad_v5 import SileroVADModelManager  # noqa: E402
 from speaches.executors.wespeaker_speaker_embedding import (  # noqa: E402
     WespeakerSpeakerEmbeddingModelManager,
@@ -209,6 +221,14 @@ class ExecutorRegistry:
                 model_registry=chatterbox_model_registry,
                 task="text-to-speech",
             )
+        self._f5_executor: Executor | None = None
+        if F5_TTS_AVAILABLE:
+            self._f5_executor = Executor[F5ModelManager, F5ModelRegistry](
+                name="f5-tts",
+                model_manager=F5ModelManager(config.tts_model_ttl),
+                model_registry=f5_model_registry,
+                task="text-to-speech",
+            )
         self._kokoro_executor = Executor[KokoroModelManager, KokoroModelRegistry](
             name="kokoro",
             model_manager=KokoroModelManager(config.tts_model_ttl, gpu_ort_opts),
@@ -264,6 +284,8 @@ class ExecutorRegistry:
             executors.append(self._qwen3_tts_executor)
         if self._chatterbox_executor is not None:
             executors.append(self._chatterbox_executor)
+        if self._f5_executor is not None:
+            executors.append(self._f5_executor)
         executors.append(self._kokoro_executor)
         return tuple(executors)
 
@@ -298,6 +320,8 @@ class ExecutorRegistry:
             executors.append(self._qwen3_tts_executor)
         if self._chatterbox_executor is not None:
             executors.append(self._chatterbox_executor)
+        if self._f5_executor is not None:
+            executors.append(self._f5_executor)
         executors.extend(
             [
                 self._kokoro_executor,
