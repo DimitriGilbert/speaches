@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 from speaches.routers.voices import _is_wav as _is_wav_imported
 
 CHATTERBOX_MODEL_ID = "ResembleAI/chatterbox"
+TURBO_MODEL_ID = "ResembleAI/chatterbox-turbo"
+MULTILINGUAL_MODEL_ID = "ResembleAI/chatterbox-multilingual"
 EXPECTED_SAMPLE_RATE = 24000
 
 
@@ -58,8 +60,13 @@ class _FakeChatterboxTTS:
     def from_pretrained(cls, device: str = "cpu") -> _FakeChatterboxTTS:  # noqa: ARG003
         return cls()
 
-    def generate(self, text: str, audio_prompt_path: str | None = None) -> _FakeTensor:
-        type(self).last_generate_kwargs = {"text": text, "audio_prompt_path": audio_prompt_path}
+    def generate(self, text: str, audio_prompt_path: str | None = None, **kwargs: object) -> _FakeTensor:
+        # Record everything (including variant-specific args like language_id).
+        type(self).last_generate_kwargs = {
+            "text": text,
+            "audio_prompt_path": audio_prompt_path,
+            **kwargs,
+        }
         # Real Chatterbox.generate() returns a torch.Tensor of shape (1, N)
         # (mono as 2-D). Mirror that so the executor's flatten path is exercised.
         return _FakeTensor(np.zeros((1, 100), dtype=np.float32))
@@ -75,28 +82,35 @@ def _reset_fake_generate_call() -> Generator[None]:
 
 @pytest.fixture
 def chatterbox_executor() -> Generator[tuple[types.ModuleType, type]]:
-    """Import the executor with a fake ``chatterbox.tts`` available in ``sys.modules``.
+    """Import the executor with fake chatterbox modules available in ``sys.modules``.
 
-    The executor module is reloaded (after injecting the fake modules) so its
-    top-level ``try: from chatterbox.tts import ChatterboxTTS`` succeeds, making
+    The executor imports from three modules (``chatterbox`` for the multilingual
+    class, ``chatterbox.tts`` for the base, ``chatterbox.tts_turbo`` for Turbo).
+    Inject fakes for all three so the top-level try/except succeeds, making
     ``CHATTERBOX_AVAILABLE`` True and ``ChatterboxModelManager`` defined. The real
     modules and the previously imported executor module are restored on teardown.
     """
     # ``ModuleType`` is what ``sys.modules`` expects; attribute assignment on it
     # is normal at runtime but pyrefly can't see the synthetic attributes.
     fake_pkg = types.ModuleType("chatterbox")
+    fake_pkg.ChatterboxMultilingualTTS = _FakeChatterboxTTS  # type: ignore[missing-attribute]
     fake_tts = types.ModuleType("chatterbox.tts")
     fake_tts.ChatterboxTTS = _FakeChatterboxTTS  # type: ignore[missing-attribute]
+    fake_turbo = types.ModuleType("chatterbox.tts_turbo")
+    fake_turbo.ChatterboxTurboTTS = _FakeChatterboxTTS  # type: ignore[missing-attribute]
     fake_pkg.tts = fake_tts  # type: ignore[missing-attribute]
+    fake_pkg.tts_turbo = fake_turbo  # type: ignore[missing-attribute]
 
     saved_modules = {
         "chatterbox": sys.modules.get("chatterbox"),
         "chatterbox.tts": sys.modules.get("chatterbox.tts"),
+        "chatterbox.tts_turbo": sys.modules.get("chatterbox.tts_turbo"),
         "speaches.executors.chatterbox": sys.modules.get("speaches.executors.chatterbox"),
         "speaches.executors.shared.registry": sys.modules.get("speaches.executors.shared.registry"),
     }
     sys.modules["chatterbox"] = fake_pkg
     sys.modules["chatterbox.tts"] = fake_tts
+    sys.modules["chatterbox.tts_turbo"] = fake_turbo
     sys.modules.pop("speaches.executors.chatterbox", None)
     # The registry imports chatterbox symbols at module load; drop its cached
     # import so it re-evaluates CHATTERBOX_AVAILABLE against the fake module.
@@ -206,6 +220,71 @@ def test_handle_speech_request_clone_passes_audio_prompt(
     assert chunks[0].sample_rate == EXPECTED_SAMPLE_RATE
     assert _FakeChatterboxTTS.last_generate_kwargs is not None
     assert _FakeChatterboxTTS.last_generate_kwargs["audio_prompt_path"] == str(clone_file)
+
+
+def test_handle_speech_request_turbo_clone(
+    chatterbox_executor: tuple[types.ModuleType, type],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """The Turbo variant resolves by model id and forwards the clone sample."""
+    chatterbox_mod, manager_cls = chatterbox_executor
+
+    clone_dir = tmp_path / "voices"
+    clone_dir.mkdir()
+    clone_file = clone_dir / "fast-voice.wav"
+    sf.write(clone_file, np.zeros(10, dtype=np.float32), EXPECTED_SAMPLE_RATE, format="WAV")
+    monkeypatch.setattr(chatterbox_mod, "CLONE_VOICES_DIR", clone_dir)
+
+    manager = manager_cls(ttl=-1)
+    from speaches.executors.shared.handler_protocol import SpeechRequest
+
+    request = SpeechRequest(model=TURBO_MODEL_ID, voice="fast-voice", text="hello", speed=1.0)
+    chunks = list(manager.handle_speech_request(request))
+    assert len(chunks) == 1
+    # Turbo uses the same clone API; the clone path must be forwarded.
+    assert _FakeChatterboxTTS.last_generate_kwargs is not None
+    assert _FakeChatterboxTTS.last_generate_kwargs["audio_prompt_path"] == str(clone_file)
+    # And no language_id for the non-multilingual variant.
+    assert "language_id" not in _FakeChatterboxTTS.last_generate_kwargs
+
+
+def test_handle_speech_request_multilingual_passes_language_id(
+    chatterbox_executor: tuple[types.ModuleType, type],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """The multilingual variant receives a language_id (from the voice hint or default)."""
+    chatterbox_mod, manager_cls = chatterbox_executor
+
+    clone_dir = tmp_path / "voices"
+    clone_dir.mkdir()
+    # Voice id carries a language hint: "<voice>__<iso>".
+    clone_file = clone_dir / "narrator__de.wav"
+    sf.write(clone_file, np.zeros(10, dtype=np.float32), EXPECTED_SAMPLE_RATE, format="WAV")
+    monkeypatch.setattr(chatterbox_mod, "CLONE_VOICES_DIR", clone_dir)
+
+    manager = manager_cls(ttl=-1)
+    from speaches.executors.shared.handler_protocol import SpeechRequest
+
+    request = SpeechRequest(model=MULTILINGUAL_MODEL_ID, voice="narrator__de", text="hallo", speed=1.0)
+    chunks = list(manager.handle_speech_request(request))
+    assert len(chunks) == 1
+    # Multilingual.generate() must receive language_id (de -> 5) and the clone path.
+    assert _FakeChatterboxTTS.last_generate_kwargs is not None
+    assert _FakeChatterboxTTS.last_generate_kwargs["language_id"] == 5
+    assert _FakeChatterboxTTS.last_generate_kwargs["audio_prompt_path"] == str(clone_file)
+
+
+def test_resolve_language_falls_back_to_model_default(
+    chatterbox_executor: tuple[types.ModuleType, type],
+) -> None:
+    """Without a __<lang> hint the model's first listed language is used."""
+    _chatterbox_mod, manager_cls = chatterbox_executor
+    # KNOWN_MODELS[MULTILINGUAL_MODEL_ID][0] == "en" -> id 0
+    assert manager_cls._resolve_language("plainvoice", MULTILINGUAL_MODEL_ID) == 0  # type: ignore[attr-defined, SLF001]  # noqa: SLF001 -- exercising a private staticmethod in a test
+    # And a hint overrides it.
+    assert manager_cls._resolve_language("v__ja", MULTILINGUAL_MODEL_ID) == 2  # type: ignore[attr-defined, SLF001]  # noqa: SLF001
 
 
 def test_handle_speech_request_unknown_voice_raises(
