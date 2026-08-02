@@ -32,6 +32,14 @@ try:
     import torch
 
     torch.set_num_threads(os.cpu_count() or 1)
+    # Also enable inter-op parallelism so transformers' `generate` can run
+    # independent graph ops across cores (intra-op above only covers matmul).
+    # Can only be called once per process and before any parallel work begins;
+    # guard against it having already been initialized elsewhere.
+    import contextlib
+
+    with contextlib.suppress(RuntimeError):
+        torch.set_num_interop_threads(max((os.cpu_count() or 1), 1))
 
     from transformers import AutoProcessor, CsmForConditionalGeneration
 
@@ -210,11 +218,12 @@ if CSM_AVAILABLE:
             self._transcription_cache[cache_key] = text
             return text
 
-        def _load_ref_audio_24k(self, clone_path: pathlib.Path) -> Any:
+        def _load_ref_audio_24k(self, clone_path: pathlib.Path) -> np.ndarray:
             # CSM requires a 24kHz mono reference. Clone wavs may be stored at
             # arbitrary rates (the upload endpoint transcodes to 16kHz), so
-            # resample to 24kHz and downmix to mono. Returns a torch tensor of
-            # shape (1, N) at SAMPLE_RATE, ready for the chat template.
+            # resample to 24kHz and downmix to mono. Returns a numpy float32
+            # 1-D array, which transformers' load_audio accepts (it rejects
+            # torch tensors, only taking a URL/path string or numpy array).
             import torchaudio
 
             wav, sr = torchaudio.load(str(clone_path))
@@ -222,7 +231,7 @@ if CSM_AVAILABLE:
                 wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE)
             if wav.shape[0] > 1:
                 wav = wav.mean(dim=0, keepdim=True)
-            return wav
+            return wav.numpy().astype(np.float32).reshape(-1)
 
         @traced_generator()
         def handle_speech_request(
