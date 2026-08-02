@@ -3,7 +3,7 @@
 #   - CPU base image (chatterbox runs with device="cpu"), instead of nvidia/cuda.
 #   - An extra `uv pip install` layer that adds chatterbox-tts + its pinned torch (see the
 #     torch-conflict comment below for why this bypasses the project lock).
-#   - A short TTS_MODEL_TTL, since the chatterbox models are ~2-3 GB resident.
+#   - A short TTS_MODEL_TTL (~2-3 GB model evicted when idle; see that ENV comment).
 # The nvidia/ctranslate2 ldconfig block from the base image is intentionally OMITTED here:
 # this is a CPU image with no nvidia libraries to register, and ctranslate2 GPU libs are unused
 # for the chatterbox (device="cpu") flow.
@@ -79,8 +79,10 @@ RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
         "torch==2.6.0" "torchaudio==2.6.0" && \
     uv pip install --python /home/ubuntu/speaches/.venv/bin/python \
         "chatterbox-tts==0.1.7"
-# The chatterbox models are large (~2-3 GB resident); keep a short TTL so they are evicted from
-# the in-memory model cache rather than held indefinitely.
+# Keep a short TTS_MODEL_TTL: the chatterbox models are ~2-3 GB resident, and
+# this is a shared devbox (don't hog RAM when idle). The ~7-8s reload on a cold
+# Generate is the trade-off; torch threads are pinned (see chatterbox.py) so the
+# actual generation is as fast as the CPU allows. Override in the env to change.
 ENV TTS_MODEL_TTL=30
 ENV UVICORN_HOST=0.0.0.0
 ENV UVICORN_PORT=8000

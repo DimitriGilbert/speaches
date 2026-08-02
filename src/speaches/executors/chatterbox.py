@@ -23,8 +23,17 @@ from speaches.model_registry import ModelRegistry
 from speaches.tracing import traced_generator
 
 try:
+    import os
+
     from chatterbox.tts import ChatterboxTTS
-    import torch  # noqa: F401 -- must be imported before ctranslate2 to avoid OpenMP segfault
+
+    # Imported before ctranslate2 to avoid an OpenMP segfault; also used below
+    # to pin the thread count for the CPU-bound T3/VE autoregressive sampling.
+    import torch
+
+    # Torch defaults to half the cores in some builds, which roughly halves TTS
+    # throughput — use all available cores so generation isn't needlessly slow.
+    torch.set_num_threads(os.cpu_count() or 1)
 
     CHATTERBOX_AVAILABLE = True
 except ImportError:
