@@ -34,6 +34,12 @@ ENV HOME=/home/ubuntu \
 WORKDIR $HOME/speaches
 # https://docs.astral.sh/uv/guides/integration/docker/#installing-uv
 COPY --chown=ubuntu --from=ghcr.io/astral-sh/uv:0.10 /uv /bin/uv
+# The committed uv.lock requires Python ==3.13.* (longregen base generated the
+# lock against 3.13). Pin uv to install + use 3.13 so `uv sync --frozen` finds
+# a compatible interpreter instead of fetching the latest (3.14), which the
+# frozen lock rejects.
+ENV UV_PYTHON=3.13
+RUN uv python install 3.13
 # NOTE: per https://docs.astral.sh/uv/guides/install-python, `uv` will automatically install the necessary python version
 # https://docs.astral.sh/uv/guides/integration/docker/#intermediate-layers
 # https://docs.astral.sh/uv/guides/integration/docker/#compiling-bytecode
