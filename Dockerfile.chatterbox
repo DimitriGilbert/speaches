@@ -54,6 +54,10 @@ RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
 # PermissionError: [Errno 13] Permission denied: '/home/ubuntu/.cache/huggingface/hub'
 # This error occurs because the volume is mounted as root and the `ubuntu` user doesn't have permission to write to it. Pre-creating the directory solves this issue.
 RUN mkdir -p $HOME/.cache/huggingface/hub
+# Same pre-creation for the voice-clone samples dir: a named volume mounts as
+# root, so pre-create it as ubuntu to avoid PermissionError on upload.
+# (chatterbox reads ~/.cache/speaches/voices/*.wav as clone voices.)
+RUN mkdir -p $HOME/.cache/speaches/voices
 # ---- Chatterbox executor: install chatterbox-tts + its pinned torch directly into the venv ----
 # Why a separate `uv pip install` instead of `uv sync --group chatterbox`:
 # `chatterbox-tts==0.1.7` hard-pins `torch==2.6.0` and `torchaudio==2.6.0`, while a core
