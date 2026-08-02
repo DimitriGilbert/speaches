@@ -453,8 +453,10 @@ if QWEN3_TTS_AVAILABLE:
 
         def _gen_base_clone(self, model: Any, text: str, voice: str) -> tuple[list, int]:
             # Base variants are clone-only: `voice` is a user-uploaded clone id
-            # resolved to a .wav under CLONE_VOICES_DIR. Unlike CSM, Qwen's clone
-            # does not require a transcript — ref_text="" lets the model infer it.
+            # resolved to a .wav under CLONE_VOICES_DIR. Use x_vector_only_mode
+            # (speaker-embedding-only) so NO reference transcript is required —
+            # the default ICL mode rejects ref_text="" and we don't store
+            # transcripts. Verified at runtime: produces valid cloned audio.
             # Do NOT call _resolve_speaker here; that helper is CustomVoice-only.
             clone_path = _clone_path_for_voice(voice)
             if clone_path is None:
@@ -465,6 +467,7 @@ if QWEN3_TTS_AVAILABLE:
                 language="Auto",
                 ref_audio=str(clone_path),
                 ref_text="",
+                x_vector_only_mode=True,
                 **_GEN_KWARGS,
             )
 
