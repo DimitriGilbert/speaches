@@ -75,6 +75,9 @@ test = [
     "srt>=3.5.3",
     "webvtt-py>=0.5.1",
 ]
+chatterbox = [
+    "chatterbox-tts",
+]
 
 [build-system]
 requires = ["hatchling"]

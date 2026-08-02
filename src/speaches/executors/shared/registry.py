@@ -59,6 +59,18 @@ try:
 except ImportError:
     pass
 
+CHATTERBOX_AVAILABLE = False
+try:
+    from speaches.executors.chatterbox import (
+        ChatterboxModelManager,
+        ChatterboxModelRegistry,
+        chatterbox_model_registry,
+    )
+
+    CHATTERBOX_AVAILABLE = True
+except ImportError:
+    pass
+
 from speaches.executors.silero_vad_v5 import SileroVADModelManager  # noqa: E402
 from speaches.executors.wespeaker_speaker_embedding import (  # noqa: E402
     WespeakerSpeakerEmbeddingModelManager,
@@ -143,6 +155,14 @@ class ExecutorRegistry:
                 model_registry=qwen3_tts_model_registry,
                 task="text-to-speech",
             )
+        self._chatterbox_executor: Executor | None = None
+        if CHATTERBOX_AVAILABLE:
+            self._chatterbox_executor = Executor[ChatterboxModelManager, ChatterboxModelRegistry](
+                name="chatterbox",
+                model_manager=ChatterboxModelManager(config.tts_model_ttl),
+                model_registry=chatterbox_model_registry,
+                task="text-to-speech",
+            )
         self._kokoro_executor = Executor[KokoroModelManager, KokoroModelRegistry](
             name="kokoro",
             model_manager=KokoroModelManager(config.tts_model_ttl, gpu_ort_opts),
@@ -196,6 +216,8 @@ class ExecutorRegistry:
             executors.append(self._kokoro_pytorch_executor)
         if self._qwen3_tts_executor is not None:
             executors.append(self._qwen3_tts_executor)
+        if self._chatterbox_executor is not None:
+            executors.append(self._chatterbox_executor)
         executors.append(self._kokoro_executor)
         return tuple(executors)
 
@@ -228,6 +250,8 @@ class ExecutorRegistry:
             executors.append(self._kokoro_pytorch_executor)
         if self._qwen3_tts_executor is not None:
             executors.append(self._qwen3_tts_executor)
+        if self._chatterbox_executor is not None:
+            executors.append(self._chatterbox_executor)
         executors.extend(
             [
                 self._kokoro_executor,
