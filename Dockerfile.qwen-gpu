@@ -1,0 +1,141 @@
+# Dockerfile.qwen-gpu — AMD ROCm GPU image variant (Barcelo gfx900 iGPU) that runs
+# the qwen-tts executor on the iGPU instead of CPU via the ROCm torch wheel.
+# Differences from Dockerfile.qwen:
+#   - Inherits the CPU base image, UV_PYTHON=3.13 pin, and the base uv sync layers.
+#   - Adds a NEW torch-replacement layer that force-reinstalls torch==2.6.0+rocm6.2.4
+#     (and torchaudio) into the venv, replacing the CPU torch installed by the base
+#     uv sync. Placed BEFORE the chatterbox layer so subsequent installs see the
+#     ROCm torch.
+#   - Keeps the chatterbox + f5 + qwen (transformers==4.57.3) layers unchanged from
+#     Dockerfile.qwen; they `uv pip install` on top of the now-ROCm torch.
+#   - Sets HSA_OVERRIDE_GFX_VERSION=9.0.0 so the ROCm runtime exposes the Barcelo
+#     gfx900 iGPU as a usable device. /dev/kfd + /dev/dri passthrough is set in the
+#     compose env, NOT here.
+#   - Same short TTS_MODEL_TTL, voices dir pre-creation, EXPOSE, CMD, and omitted
+#     nvidia ldconfig block as Dockerfile.qwen.
+# The nvidia/ctranslate2 ldconfig block from the base image is intentionally OMITTED here:
+# this image uses the ROCm torch wheel (no nvidia libraries) and ctranslate2 GPU libs are
+# unused for the qwen / f5 flow.
+ARG BASE_IMAGE=ubuntu:24.04
+# hadolint ignore=DL3006
+FROM ${BASE_IMAGE}
+LABEL org.opencontainers.image.source="https://github.com/speaches-ai/speaches"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.title="speaches-qwen-gpu"
+LABEL org.opencontainers.image.description="speaches AMD ROCm GPU image (Barcelo gfx900 iGPU) with the chatterbox + f5-tts + qwen-tts executors (chatterbox-tts, torch 2.6.0 ROCm 6.2.4 gfx9, f5-tts with Whisper ASR + vocos vocoder, qwen-tts pinned to transformers 4.57.3, HSA_OVERRIDE_GFX_VERSION=9.0.0)"
+# `ffmpeg` is installed because without it `gradio` won't work with mp3(possible others as well) files
+# hadolint ignore=DL3008
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl ffmpeg
+# "ubuntu" is the default user on ubuntu images with UID=1000. This user is used for two reasons:
+#   1. It's generally a good practice to run containers as non-root users. See https://www.docker.com/blog/understanding-the-docker-user-instruction/
+#   2. Docker Spaces on HuggingFace don't support running containers as root. See https://huggingface.co/docs/hub/en/spaces-sdks-docker#permissions
+# NOTE: the following command was added since nvidia/cuda:12.4.1-base-ubuntu22.04 doesn't have the `ubuntu` user
+RUN useradd --create-home --shell /bin/bash --uid 1000 ubuntu || true
+USER ubuntu
+ENV HOME=/home/ubuntu \
+    PATH=/home/ubuntu/.local/bin:$PATH \
+    UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/home/ubuntu/.cache/uv \
+    UV_PYTHON_CACHE_DIR=/home/ubuntu/.cache/uv/python
+WORKDIR $HOME/speaches
+# https://docs.astral.sh/uv/guides/integration/docker/#installing-uv
+COPY --chown=ubuntu --from=ghcr.io/astral-sh/uv:0.10 /uv /bin/uv
+# The committed uv.lock requires Python ==3.13.* (longregen base generated the
+# lock against 3.13). Pin uv to install + use 3.13 so `uv sync --frozen` finds
+# a compatible interpreter instead of fetching the latest (3.14), which the
+# frozen lock rejects.
+ENV UV_PYTHON=3.13
+RUN uv python install 3.13
+# NOTE: per https://docs.astral.sh/uv/guides/install-python, `uv` will automatically install the necessary python version
+# https://docs.astral.sh/uv/guides/integration/docker/#intermediate-layers
+# https://docs.astral.sh/uv/guides/integration/docker/#compiling-bytecode
+RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --compile-bytecode --no-install-project --no-dev
+COPY --chown=ubuntu . .
+RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
+    uv sync --frozen --compile-bytecode --no-dev
+# Creating a directory for the cache to avoid the following error:
+# PermissionError: [Errno 13] Permission denied: '/home/ubuntu/.cache/huggingface/hub'
+# This error occurs because the volume is mounted as root and the `ubuntu` user doesn't have permission to write to it. Pre-creating the directory solves this issue.
+RUN mkdir -p $HOME/.cache/huggingface/hub
+# Same pre-creation for the voice-clone samples dir: a named volume mounts as
+# root, so pre-create it as ubuntu to avoid PermissionError on upload.
+# (chatterbox reads ~/.cache/speaches/voices/*.wav as clone voices.)
+RUN mkdir -p $HOME/.cache/speaches/voices
+# ---- Replace CPU torch with the ROCm build (gfx9 iGPU support) ----
+# The base uv sync installs CPU torch from the lock; for the GPU image we
+# force-reinstall the ROCm wheel. torch==2.6.0+rocm6.2.4 satisfies
+# chatterbox-tts's torch==2.6.0 pin (local versions satisfy ==). The ROCm
+# build exposes the iGPU via torch.cuda (ROCm mirrors the CUDA API). The
+# wheel bundles the ROCm 6.2.4 runtime, which is forward-compatible with the
+# host's 7.1.x runtime at the ABI level (the amdgpu kernel driver is what
+# actually matters and is loaded). HSA_OVERRIDE_GFX_VERSION=9.0.0 (set in
+# the ENV below and the compose env) makes the runtime expose the Barcelo
+# gfx900 iGPU — the wheel ships gfx9 kernels (gfx900/906/908/90a). Placed
+# BEFORE the chatterbox layer so subsequent installs see the ROCm torch.
+RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
+    uv pip install --python /home/ubuntu/speaches/.venv/bin/python \
+        --force-reinstall \
+        --index-url https://download.pytorch.org/whl/rocm6.2.4 \
+        "torch==2.6.0" "torchaudio==2.6.0"
+# ---- Chatterbox executor: install chatterbox-tts on top of the ROCm torch ----
+# Why a separate `uv pip install` instead of `uv sync --group chatterbox`:
+# `chatterbox-tts==0.1.7` hard-pins `torch==2.6.0` and `torchaudio==2.6.0`, while a core
+# dependency, `pyannote-audio>=4.0.3`, requires `torch>=2.8.0`. Those two pins are mutually
+# exclusive in uv's project resolver, so `uv sync --group chatterbox` FAILS at lock/resolution
+# time. To work around this we install into the already-built venv with `uv pip install`
+# (pip-compatibility mode), which ignores the project lock and `[tool.uv]` overrides and lets
+# torch stay at the ROCm 2.6.0 we just installed. pyannote-audio remains installed from the
+# base sync; its torch>=2.8 pin is metadata only and runs fine on torch 2.6.0 for the TTS-only
+# clone flow (speaker diarization is not used here).
+#
+# chatterbox-tts is installed from PyPI. Note we do NOT pass the PyTorch index here: the
+# ROCm torch/torchaudio are already in the venv from the replacement layer above, and uv pip
+# leaves them in place since chatterbox-tts's `torch==2.6.0` pin is satisfied by
+# `torch==2.6.0+rocm6.2.4` (local versions satisfy ==).
+RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
+    uv pip install --python /home/ubuntu/speaches/.venv/bin/python \
+        "chatterbox-tts==0.1.7"
+# ---- F5-TTS executor: install f5-tts on top of the chatterbox base ----
+# f5-tts (pip package) brings its own deps (Whisper ASR for ref transcription,
+# vocos vocoder, etc.) which install fine alongside the existing torch 2.6.0 ROCm.
+# f5-tts may adjust some shared deps (e.g. gradio, starlette) — acceptable for
+# this dedicated image variant.
+RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
+    uv pip install --python /home/ubuntu/speaches/.venv/bin/python "f5-tts"
+# ---- Qwen3-TTS executor: install qwen-tts, pinning transformers==4.57.3 ----
+# qwen-tts==0.1.1 hard-requires transformers==4.57.3, which conflicts with
+# chatterbox-tts's transformers==5.2.0 pin. Verified at runtime: chatterbox
+# AND f5 still import + generate fine at transformers 4.57.3 (their 5.2.0 pin
+# is metadata-only for the import path). Force the downgrade here so qwen-tts
+# resolves; the other executors keep working.
+RUN --mount=type=cache,target=/home/ubuntu/.cache/uv,uid=1000,gid=1000 \
+    uv pip install --python /home/ubuntu/speaches/.venv/bin/python \
+        --force-reinstall "transformers==4.57.3" "qwen-tts==0.1.1"
+# Keep a short TTS_MODEL_TTL: the chatterbox models are ~2-3 GB resident, and
+# this is a shared devbox (don't hog RAM when idle). The ~7-8s reload on a cold
+# Generate is the trade-off; torch threads are pinned (see chatterbox.py) so the
+# actual generation is as fast as the iGPU allows. Override in the env to change.
+ENV TTS_MODEL_TTL=30
+ENV UVICORN_HOST=0.0.0.0
+ENV UVICORN_PORT=8000
+ENV PATH="$HOME/speaches/.venv/bin:$PATH"
+# ROCm: make the runtime expose the Barcelo gfx900 iGPU as a usable device.
+# The ROCm torch wheel ships gfx9 kernels; this override is required because the
+# host's Barcelo iGPU reports a gfx version the runtime doesn't natively list,
+# but 9.0.0 maps it onto the shipped gfx9 kernels.
+ENV HSA_OVERRIDE_GFX_VERSION=9.0.0
+# https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables#donottrack
+# https://www.reddit.com/r/StableDiffusion/comments/1f6asvd/gradio_sends_ip_address_telemetry_by_default/
+ENV DO_NOT_TRACK=1
+ENV GRADIO_ANALYTICS_ENABLED="False"
+ENV DISABLE_TELEMETRY=1
+ENV HF_HUB_DISABLE_TELEMETRY=1
+ENV PYANNOTE_METRICS_ENABLED=0
+EXPOSE 8000
+CMD ["uvicorn", "--factory", "speaches.main:create_app"]
