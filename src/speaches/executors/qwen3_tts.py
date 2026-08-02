@@ -95,6 +95,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _default_device() -> str:
+    # Auto-detect CUDA, fall back to CPU for CPU-only hosts.
+    try:
+        import torch
+
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
+    except ImportError:
+        return "cpu"
+
+
+_DEFAULT_DEVICE = _default_device()
+
 TASK_NAME_TAG = "text-to-speech"
 _VARIANT_CUSTOM = "custom_voice"
 _VARIANT_DESIGN = "voice_design"
@@ -313,7 +326,7 @@ if QWEN3_TTS_AVAILABLE:
         def __init__(
             self,
             ttl: int,
-            device: str = "cuda:0",
+            device: str = _DEFAULT_DEVICE,
             load_in_8bit: bool | None = None,
             default_voice: str = "Ryan",
             default_design_instruct: str = "warm, neutral, natural speaking voice",
