@@ -83,6 +83,18 @@ try:
 except ImportError:
     pass
 
+CSM_AVAILABLE = False
+try:
+    from speaches.executors.csm import (
+        CsmModelManager,
+        CsmModelRegistry,
+        csm_model_registry,
+    )
+
+    CSM_AVAILABLE = True
+except ImportError:
+    pass
+
 from speaches.executors.silero_vad_v5 import SileroVADModelManager  # noqa: E402
 from speaches.executors.wespeaker_speaker_embedding import (  # noqa: E402
     WespeakerSpeakerEmbeddingModelManager,
@@ -229,6 +241,14 @@ class ExecutorRegistry:
                 model_registry=f5_model_registry,
                 task="text-to-speech",
             )
+        self._csm_executor: Executor | None = None
+        if CSM_AVAILABLE:
+            self._csm_executor = Executor[CsmModelManager, CsmModelRegistry](
+                name="csm",
+                model_manager=CsmModelManager(config.tts_model_ttl),
+                model_registry=csm_model_registry,
+                task="text-to-speech",
+            )
         self._kokoro_executor = Executor[KokoroModelManager, KokoroModelRegistry](
             name="kokoro",
             model_manager=KokoroModelManager(config.tts_model_ttl, gpu_ort_opts),
@@ -286,6 +306,8 @@ class ExecutorRegistry:
             executors.append(self._chatterbox_executor)
         if self._f5_executor is not None:
             executors.append(self._f5_executor)
+        if self._csm_executor is not None:
+            executors.append(self._csm_executor)
         executors.append(self._kokoro_executor)
         return tuple(executors)
 
@@ -322,6 +344,8 @@ class ExecutorRegistry:
             executors.append(self._chatterbox_executor)
         if self._f5_executor is not None:
             executors.append(self._f5_executor)
+        if self._csm_executor is not None:
+            executors.append(self._csm_executor)
         executors.extend(
             [
                 self._kokoro_executor,
