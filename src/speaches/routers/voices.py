@@ -1,5 +1,6 @@
 import logging
 import re
+import subprocess
 from typing import Annotated
 
 from fastapi import (
@@ -30,6 +31,11 @@ MAX_SAMPLE_SIZE = 10 * 1024 * 1024
 _WAV_RIFF_MAGIC = b"RIFF"
 _WAV_WAVE_MAGIC = b"WAVE"
 
+# Clone samples are stored as 16 kHz mono wav — a clean reference for the
+# zero-shot cloning model regardless of the uploaded format (mic recordings
+# arrive as webm/opus; uploads may be mp3, m4a, etc.).
+_CLONE_SAMPLE_RATE = 16000
+
 
 class CreateVoiceResponse(BaseModel):
     id: str
@@ -39,6 +45,46 @@ class CreateVoiceResponse(BaseModel):
 
 def _is_wav(data: bytes) -> bool:
     return len(data) >= 12 and data[:4] == _WAV_RIFF_MAGIC and data[8:12] == _WAV_WAVE_MAGIC
+
+
+def _transcode_to_wav(src: bytes, dst_path_str: str) -> None:
+    """Transcode arbitrary audio bytes to 16 kHz mono wav via ffmpeg.
+
+    Reads from stdin and writes to dst_path_str so no temp file is needed.
+    Raises HTTPException(422) if ffmpeg is missing or cannot decode the input
+    (e.g. a non-audio upload or an unsupported codec).
+    """
+    try:
+        subprocess.run(
+            [  # noqa: S607 -- ffmpeg is on PATH in the base image (apt-installed)
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                "pipe:0",
+                "-ar",
+                str(_CLONE_SAMPLE_RATE),
+                "-ac",
+                "1",
+                "-y",
+                dst_path_str,
+            ],
+            input=src,
+            capture_output=True,
+            check=True,
+        )
+    except FileNotFoundError as err:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="ffmpeg is not available to transcode the sample",
+        ) from err
+    except subprocess.CalledProcessError as err:
+        stderr = err.stderr.decode(errors="replace").strip() if err.stderr else ""
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"could not decode the audio sample{f': {stderr[:200]}' if stderr else ''}",
+        ) from err
 
 
 @router.post(
@@ -67,12 +113,6 @@ async def upload_voice(
             detail="sample too large (max 10 MB)",
         )
 
-    if file.content_type != "audio/wav" and not _is_wav(raw_bytes):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="only WAV samples are supported",
-        )
-
     CLONE_VOICES_DIR.mkdir(parents=True, exist_ok=True)
     voice_path = CLONE_VOICES_DIR / f"{voice_id}.wav"
     if voice_path.exists():
@@ -81,7 +121,13 @@ async def upload_voice(
             detail=f"voice '{voice_id}' already exists",
         )
 
-    voice_path.write_bytes(raw_bytes)
+    # Mic recordings arrive as webm/opus and uploads may be mp3/m4a/etc. Accept
+    # any format ffmpeg can decode; wav is saved as-is, everything else is
+    # transcoded to 16 kHz mono wav (the clone-reference format).
+    if _is_wav(raw_bytes):
+        voice_path.write_bytes(raw_bytes)
+    else:
+        _transcode_to_wav(raw_bytes, str(voice_path))
     logger.info(f"Saved voice '{voice_id}' to {voice_path}")
 
     return JSONResponse(

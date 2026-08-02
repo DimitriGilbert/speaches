@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import pathlib
+import shutil
 import sys
 import types
 from typing import TYPE_CHECKING
@@ -23,6 +24,9 @@ import soundfile as sf
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
+# Reuse the route's wav-header check in the transcode test.
+from speaches.routers.voices import _is_wav as _is_wav_imported
 
 CHATTERBOX_MODEL_ID = "ResembleAI/chatterbox"
 EXPECTED_SAMPLE_RATE = 24000
@@ -331,3 +335,30 @@ def test_clone_upload_endpoint_conflicts_on_duplicate(voices_client: TestClient)
         files={"file": ("dup.wav", wav_bytes, "audio/wav")},
     )
     assert second.status_code == 409
+
+
+def test_clone_upload_endpoint_transcodes_non_wav(
+    voices_client: TestClient,
+    tmp_path: pathlib.Path,
+) -> None:
+    # Mic recordings arrive as non-wav (webm/opus, mp3, ...). The endpoint must
+    # transcode them to wav via ffmpeg rather than reject them. Generate a tiny
+    # FLAC blob (soundfile supports it without ffmpeg) as the "non-wav" upload.
+    flac_buffer = io.BytesIO()
+    sf.write(flac_buffer, np.zeros(50, dtype=np.float32), EXPECTED_SAMPLE_RATE, format="FLAC")
+    flac_bytes = flac_buffer.getvalue()
+    assert not _is_wav_imported(flac_bytes)  # sanity: it really isn't wav
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed; transcode path cannot be exercised")
+
+    response = voices_client.post(
+        "/v1/audio/voices",
+        data={"name": "from-mic"},
+        files={"file": ("from-mic.flac", flac_bytes, "audio/flac")},
+    )
+    assert response.status_code == 201
+    saved = tmp_path / "from-mic.wav"
+    assert saved.exists()
+    # The transcoded file must be a real wav (RIFF/WAVE header), not the raw flac.
+    assert _is_wav_imported(saved.read_bytes())
