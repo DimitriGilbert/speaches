@@ -231,11 +231,16 @@ def test_handle_speech_request_unknown_voice_raises(
 # --- Test 4: clone surfacing in list_local_models --------------------------------
 
 
-def test_list_local_models_includes_clone_files(
+def test_list_local_models_attaches_clones_as_voices(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
 ) -> None:
-    """Clone ``.wav`` files surface as model entries whose id is the file stem."""
+    """Clone ``.wav`` files attach to the chatterbox model as voices.
+
+    Clones must NOT surface as separate model entries: the UI derives the voice
+    dropdown from the selected model's voices[], so a clone under its own id
+    would leave the real chatterbox model with an empty voice list.
+    """
     import speaches.executors.chatterbox as chatterbox_mod
 
     clone_dir = tmp_path / "voices"
@@ -244,16 +249,35 @@ def test_list_local_models_includes_clone_files(
         sf.write(clone_dir / f"{stem}.wav", np.zeros(10, dtype=np.float32), EXPECTED_SAMPLE_RATE, format="WAV")
 
     monkeypatch.setattr(chatterbox_mod, "CLONE_VOICES_DIR", clone_dir)
-    # Hide the HuggingFace cache so only the clone files are enumerated.
-    monkeypatch.setattr(chatterbox_mod, "get_cached_model_repos_info", list)
+
+    # Stub the HF cache scan to return exactly one cached chatterbox repo, so
+    # the test does not depend on a real download. The repo must pass the
+    # chatterbox library_name filter to be yielded by the first loop.
+    class _FakeRepoInfo:
+        repo_id = CHATTERBOX_MODEL_ID
+        last_modified = 0.0
+
+    class _FakeCardData:
+        library_name = "chatterbox"
+        tags = None
+
+    fake_repos = [_FakeRepoInfo()]
+
+    def _fake_get_card_data(_repo_info: object) -> _FakeCardData:
+        return _FakeCardData()
+
+    monkeypatch.setattr(chatterbox_mod, "get_cached_model_repos_info", lambda: fake_repos)
+    monkeypatch.setattr(chatterbox_mod, "get_model_card_data_from_cached_repo_info", _fake_get_card_data)
+    # list_remote_models calls extract_language_list on the card; not needed
+    # here, but keep the attribute present to avoid attribute errors elsewhere.
+    monkeypatch.setattr(chatterbox_mod, "extract_language_list", lambda _card: ["en"])
 
     models = list(chatterbox_mod.chatterbox_model_registry.list_local_models())
-    clone_ids = {model.id for model in models if model.owned_by == "speaches"}
-    assert clone_ids == {"foo", "bar"}
-    for model in models:
-        if model.id in {"foo", "bar"}:
-            assert model.sample_rate == EXPECTED_SAMPLE_RATE
-            assert [voice.name for voice in model.voices] == [model.id]
+    # Exactly one model (the chatterbox repo); clones are NOT separate models.
+    assert [m.id for m in models] == [CHATTERBOX_MODEL_ID]
+    voice_names = [v.name for v in models[0].voices]
+    assert "foo" in voice_names
+    assert "bar" in voice_names
 
 
 # --- Test 5: regression — other TTS executors unaffected ------------------------

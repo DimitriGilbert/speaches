@@ -89,6 +89,17 @@ class ChatterboxModelRegistry(ModelRegistry):
             )
 
     def list_local_models(self) -> Generator[ChatterboxModel]:
+        # Cloned voices (one .wav per file in CLONE_VOICES_DIR) are attached to
+        # every chatterbox model as additional voices — NOT exposed as separate
+        # models. The UI derives the voice dropdown from the selected model's
+        # voices[], so clones must live under the model the user picks.
+        clone_voices = (
+            [ChatterboxModelVoice(name=f.stem) for f in sorted(CLONE_VOICES_DIR.glob("*.wav"))]
+            if CLONE_VOICES_DIR.exists()
+            else []
+        )
+        all_voices = [*VOICES, *clone_voices]
+
         cached_model_repos_info = get_cached_model_repos_info()
         seen_ids: set[str] = set()
         for cached_repo_info in cached_model_repos_info:
@@ -104,7 +115,7 @@ class ChatterboxModelRegistry(ModelRegistry):
                     language=extract_language_list(model_card_data),
                     task=TASK_NAME_TAG,
                     sample_rate=SAMPLE_RATE,
-                    voices=VOICES,
+                    voices=all_voices,
                 )
         for cached_repo_info in cached_model_repos_info:
             if cached_repo_info.repo_id in seen_ids:
@@ -118,21 +129,7 @@ class ChatterboxModelRegistry(ModelRegistry):
                     language=KNOWN_MODELS[cached_repo_info.repo_id],
                     task=TASK_NAME_TAG,
                     sample_rate=SAMPLE_RATE,
-                    voices=VOICES,
-                )
-        # Expose cloned voices (one .wav file per voice in CLONE_VOICES_DIR) as available models so
-        # they appear in /v1/models automatically.
-        if CLONE_VOICES_DIR.exists():
-            for voice_file in CLONE_VOICES_DIR.glob("*.wav"):
-                voice_name = voice_file.stem
-                yield ChatterboxModel(
-                    id=voice_name,
-                    created=int(voice_file.stat().st_mtime),
-                    owned_by="speaches",
-                    language=[],
-                    task=TASK_NAME_TAG,
-                    sample_rate=SAMPLE_RATE,
-                    voices=[ChatterboxModelVoice(name=voice_name)],
+                    voices=all_voices,
                 )
 
     def get_model_files(self, model_id: str) -> None:
