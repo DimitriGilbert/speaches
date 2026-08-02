@@ -187,8 +187,10 @@ if CHATTERBOX_AVAILABLE:
                     audio = tts_any.generate(request.text, audio_prompt_path=str(clone_path))
                 else:
                     audio = tts_any.generate(request.text)
-                # Chatterbox.generate() returns a single torch.Tensor (shape
-                # (1, N)); the sample rate lives on the model as `sr`.
-                yield Audio(audio.cpu().numpy().astype(np.float32), sample_rate=tts_any.sr)
+                # Chatterbox.generate() returns a single torch.Tensor of shape
+                # (1, N) — mono as a 2D array. The sample rate lives on the
+                # model as `sr`. Flatten to 1-D float32: speaches' Audio (and
+                # the as_bytes/extend paths) expect a 1-D buffer.
+                yield Audio(audio.cpu().numpy().astype(np.float32).reshape(-1), sample_rate=tts_any.sr)
 
             logger.info(f"Generated audio for {len(request.text)} characters in {time.perf_counter() - start}s")

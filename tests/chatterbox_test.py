@@ -56,7 +56,9 @@ class _FakeChatterboxTTS:
 
     def generate(self, text: str, audio_prompt_path: str | None = None) -> _FakeTensor:
         type(self).last_generate_kwargs = {"text": text, "audio_prompt_path": audio_prompt_path}
-        return _FakeTensor(np.zeros(100, dtype=np.float32))
+        # Real Chatterbox.generate() returns a torch.Tensor of shape (1, N)
+        # (mono as 2-D). Mirror that so the executor's flatten path is exercised.
+        return _FakeTensor(np.zeros((1, 100), dtype=np.float32))
 
 
 @pytest.fixture(autouse=True)
