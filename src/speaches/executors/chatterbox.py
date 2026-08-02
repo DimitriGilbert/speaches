@@ -45,10 +45,6 @@ SAMPLE_RATE = 24000
 LIBRARY_NAME = "chatterbox"
 TASK_NAME_TAG = "text-to-speech"
 
-# Chatterbox is cloning-only: there is no fixed preset voice list. Real voices come from
-# the clone-sample directory (~/.cache/speaches/voices/*.wav).
-PREDEFINED_VOICE_NAMES: list[str] = []
-
 # Directory where user-supplied voice-cloning samples live (one .wav file per voice).
 CLONE_VOICES_DIR = pathlib.Path.home() / ".cache" / "speaches" / "voices"
 
@@ -64,7 +60,12 @@ class ChatterboxModelVoice(BaseModel):
         return self.name
 
 
-VOICES: list[ChatterboxModelVoice] = []
+# "default" routes to the no-clone path: Chatterbox.generate() is called with no
+# audio_prompt_path and the library synthesises using its built-in default voice
+# (verified to produce valid audio on both the base and Turbo variants). Real
+# cloned voices come from the clone-sample directory on top of this preset.
+DEFAULT_VOICE = ChatterboxModelVoice(name="default")
+VOICES: list[ChatterboxModelVoice] = [DEFAULT_VOICE]
 
 
 class ChatterboxModel(Model):
@@ -233,8 +234,20 @@ if CHATTERBOX_AVAILABLE:
             **_kwargs,
         ) -> SpeechResponse:
             clone_path = self._clone_path_for_voice(request.voice)
-            if clone_path is None and request.voice not in PREDEFINED_VOICE_NAMES:
-                msg = f"Voice '{request.voice}' is not supported. No preset voices and no matching clone sample in {CLONE_VOICES_DIR}."
+            # No clone sample matches -> use the model's built-in default voice
+            # (no audio_prompt_path). Chatterbox generates a valid default without
+            # a reference, so the voice name is treated as a passthrough label.
+            if clone_path is not None and request.model in TURBO_MODEL_IDS:
+                # The Turbo variant crashes inside chatterbox-tts 0.1.7 when a
+                # clone reference is supplied (dtype bug in its s3tokenizer:
+                # "expected scalar type Double but found Float"). Fail clearly
+                # instead of letting the library raise an opaque RuntimeError.
+                msg = (
+                    "Voice cloning is not available on the Turbo variant in chatterbox-tts "
+                    "0.1.7 (library dtype bug in its s3tokenizer). Use the base "
+                    "'ResembleAI/chatterbox' model for clone voices, or pick the 'default' "
+                    "voice on Turbo for preset generation."
+                )
                 raise ValueError(msg)
 
             text = request.text.strip()

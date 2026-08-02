@@ -168,9 +168,8 @@ def test_handle_speech_request_preset(
     """A preset generation call yields one float32 chunk at the chatterbox sample rate."""
     chatterbox_mod, manager_cls = chatterbox_executor
 
-    # Declare "default" as a valid preset voice and ensure no clone file matches
-    # by pointing CLONE_VOICES_DIR at an empty tmp dir.
-    monkeypatch.setattr(chatterbox_mod, "PREDEFINED_VOICE_NAMES", ["default"])
+    # "default" is the built-in preset voice; point CLONE_VOICES_DIR at an empty
+    # tmp dir so no clone file matches and the no-clone path is taken.
     monkeypatch.setattr(chatterbox_mod, "CLONE_VOICES_DIR", tmp_path)
     manager = manager_cls(ttl=-1)
 
@@ -222,29 +221,31 @@ def test_handle_speech_request_clone_passes_audio_prompt(
     assert _FakeChatterboxTTS.last_generate_kwargs["audio_prompt_path"] == str(clone_file)
 
 
-def test_handle_speech_request_turbo_clone(
+def test_handle_speech_request_turbo_preset(
     chatterbox_executor: tuple[types.ModuleType, type],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
 ) -> None:
-    """The Turbo variant resolves by model id and forwards the clone sample."""
+    """The Turbo variant routes by model id and runs the no-clone preset path.
+
+    Turbo clone support was disabled (see test_turbo_clone_raises_clear_error);
+    the preset path (no clone sample) is unaffected and must still generate one
+    chunk without an audio_prompt_path.
+    """
     chatterbox_mod, manager_cls = chatterbox_executor
 
-    clone_dir = tmp_path / "voices"
-    clone_dir.mkdir()
-    clone_file = clone_dir / "fast-voice.wav"
-    sf.write(clone_file, np.zeros(10, dtype=np.float32), EXPECTED_SAMPLE_RATE, format="WAV")
-    monkeypatch.setattr(chatterbox_mod, "CLONE_VOICES_DIR", clone_dir)
+    # Empty clone dir -> no clone file matches -> no-clone preset path.
+    monkeypatch.setattr(chatterbox_mod, "CLONE_VOICES_DIR", tmp_path)
 
     manager = manager_cls(ttl=-1)
     from speaches.executors.shared.handler_protocol import SpeechRequest
 
-    request = SpeechRequest(model=TURBO_MODEL_ID, voice="fast-voice", text="hello", speed=1.0)
+    request = SpeechRequest(model=TURBO_MODEL_ID, voice="default", text="hello", speed=1.0)
     chunks = list(manager.handle_speech_request(request))
     assert len(chunks) == 1
-    # Turbo uses the same clone API; the clone path must be forwarded.
+    # Preset path: no audio_prompt_path forwarded.
     assert _FakeChatterboxTTS.last_generate_kwargs is not None
-    assert _FakeChatterboxTTS.last_generate_kwargs["audio_prompt_path"] == str(clone_file)
+    assert _FakeChatterboxTTS.last_generate_kwargs["audio_prompt_path"] is None
     # And no language_id for the non-multilingual variant.
     assert "language_id" not in _FakeChatterboxTTS.last_generate_kwargs
 
@@ -287,15 +288,18 @@ def test_resolve_language_falls_back_to_model_default(
     assert manager_cls._resolve_language("v__ja", MULTILINGUAL_MODEL_ID) == 2  # type: ignore[attr-defined, SLF001]  # noqa: SLF001
 
 
-def test_handle_speech_request_unknown_voice_raises(
+def test_handle_speech_request_unknown_voice_uses_default(
     chatterbox_executor: tuple[types.ModuleType, type],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
 ) -> None:
-    """A voice that is neither preset nor an existing clone file is rejected."""
+    """A voice with no matching clone file routes to the built-in default voice.
+
+    The voice name is a passthrough label on the no-clone path: generate() is
+    called with no audio_prompt_path and the library synthesises a default voice.
+    """
     chatterbox_mod, manager_cls = chatterbox_executor
-    # No presets, and point the clone dir at an empty tmp dir.
-    monkeypatch.setattr(chatterbox_mod, "PREDEFINED_VOICE_NAMES", [])
+    # Point the clone dir at an empty tmp dir so no clone file matches.
     monkeypatch.setattr(chatterbox_mod, "CLONE_VOICES_DIR", tmp_path)
 
     manager = manager_cls(ttl=-1)
@@ -303,8 +307,40 @@ def test_handle_speech_request_unknown_voice_raises(
     from speaches.executors.shared.handler_protocol import SpeechRequest
 
     request = SpeechRequest(model=CHATTERBOX_MODEL_ID, voice="no-such-voice", text="hello", speed=1.0)
-    with pytest.raises(ValueError, match="not supported"):
+    chunks = list(manager.handle_speech_request(request))
+
+    assert len(chunks) == 1
+    assert _FakeChatterboxTTS.last_generate_kwargs is not None
+    assert _FakeChatterboxTTS.last_generate_kwargs["audio_prompt_path"] is None
+
+
+def test_turbo_clone_raises_clear_error(
+    chatterbox_executor: tuple[types.ModuleType, type],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    """Requesting a clone voice on the Turbo variant raises a clear ValueError.
+
+    chatterbox-tts 0.1.7's Turbo variant crashes (dtype bug) when a clone
+    reference is supplied, so the executor must reject it up front rather than
+    let the library raise an opaque RuntimeError.
+    """
+    chatterbox_mod, manager_cls = chatterbox_executor
+
+    clone_dir = tmp_path / "voices"
+    clone_dir.mkdir()
+    clone_file = clone_dir / "turbo-clone.wav"
+    sf.write(clone_file, np.zeros(10, dtype=np.float32), EXPECTED_SAMPLE_RATE, format="WAV")
+    monkeypatch.setattr(chatterbox_mod, "CLONE_VOICES_DIR", clone_dir)
+
+    manager = manager_cls(ttl=-1)
+    from speaches.executors.shared.handler_protocol import SpeechRequest
+
+    request = SpeechRequest(model=TURBO_MODEL_ID, voice="turbo-clone", text="hello", speed=1.0)
+    with pytest.raises(ValueError, match="Turbo"):
         list(manager.handle_speech_request(request))
+    # And the model was never loaded (the guard fires before generation).
+    assert _FakeChatterboxTTS.last_generate_kwargs is None
 
 
 # --- Test 4: clone surfacing in list_local_models --------------------------------
