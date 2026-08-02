@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 from fastapi import HTTPException
 from huggingface_hub.utils._cache_manager import _scan_cached_repo
 
+from speaches.executors.shared.registry import _select_most_specific_executor
 from speaches.hf_utils import (
     MODEL_CARD_DOESNT_EXISTS_ERROR_MESSAGE,
     get_model_card_data_from_cached_repo_info,
@@ -39,10 +40,38 @@ def get_model_card_data_or_raise(model_id: str) -> huggingface_hub.ModelCardData
 def find_executor_for_model_or_raise[T: Executor](
     model_id: str, model_card_data: huggingface_hub.ModelCardData, executors: Iterable[T]
 ) -> T:
+    # Collect ALL executors that can handle the model, then resolve via filter
+    # specificity instead of returning the first match. Without this, broad
+    # filters (e.g. Kokoro's ``HfModelFilter(task="text-to-speech")``) shadow
+    # more specific executors that own a given model id, routing requests to the
+    # wrong executor (Kokoro would receive ``ResembleAI/chatterbox-turbo`` and
+    # reject the voice).
+    candidates: list[T] = []
     for executor in executors:
         if executor.can_handle_model(model_id, model_card_data):
-            return executor
-    raise HTTPException(
-        status_code=404,
-        detail=f"Model '{model_id}' is not supported. If you think this is a mistake, please open an issue.",
-    )
+            candidates.append(executor)
+            continue
+        # Id-based fallback: a model card for a fine-tune/clone may omit the
+        # fields the executor's HF filter requires (e.g. a cloned
+        # ``chatterbox-turbo`` repo lacks ``library_name: chatterbox``), so the
+        # filter rejects a card that the executor legitimately owns. Accept the
+        # executor if its registry lists this model id locally.
+        try:
+            listed_ids = {m.id for m in executor.model_registry.list_local_models()}
+        except (OSError, ValueError):
+            listed_ids = set()
+        if model_id in listed_ids:
+            candidates.append(executor)
+    if not candidates:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{model_id}' is not supported. If you think this is a mistake, please open an issue.",
+        )
+    # ``_select_most_specific_executor`` breaks ties by iteration order, which
+    # is preserved from ``executors`` (e.g. chatterbox before kokoro in
+    # ``ExecutorRegistry.text_to_speech``). ``candidates`` holds the same
+    # concrete ``Executor`` subtype as ``T`` (all drawn from ``executors``), so
+    # the casts are sound.
+    selected = _select_most_specific_executor(cast("list[Executor]", candidates))
+    assert selected is not None  # candidates is non-empty here
+    return cast("T", selected)
