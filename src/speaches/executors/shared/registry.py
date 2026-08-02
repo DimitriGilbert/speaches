@@ -95,6 +95,52 @@ def _cpu_only_ort_opts(base: OrtOptions) -> OrtOptions:
     )
 
 
+def _filter_specificity(hf_model_filter: HfModelFilter) -> int:
+    """Count the number of constraining fields set on an ``HfModelFilter``.
+
+    A higher count means a more specific (narrower) filter. This is used to
+    disambiguate model ids that are claimed by more than one executor: the
+    executor with the most specific filter "owns" the model.
+    """
+    score = 0
+    if hf_model_filter.library_name is not None:
+        score += 1
+    if hf_model_filter.task is not None:
+        score += 1
+    if hf_model_filter.model_name is not None:
+        score += 1
+    if hf_model_filter.tags is not None:
+        score += 1
+    return score
+
+
+def _select_most_specific_executor(executors: list[Executor]) -> Executor | None:
+    """Pick the most specific executor from a list of candidates.
+
+    Why this exists: some executors register intentionally broad filters. In
+    particular Kokoro's registry uses ``HfModelFilter(task="text-to-speech")``
+    which matches ANY text-to-speech model on HuggingFace, including models that
+    are owned by more specific executors (e.g. ``ResembleAI/chatterbox-turbo``,
+    which is owned by the chatterbox executor whose filter pins
+    ``library_name="chatterbox"``). When two executors both list the same model
+    id, returning the first one in iteration order routes the request to the
+    wrong executor (Kokoro receives chatterbox requests and rejects the voice).
+
+    We instead resolve to the executor whose ``HfModelFilter`` is the most
+    specific (most constraining fields set). Ties are broken by the original
+    iteration order (stable), so genuinely unambiguous models — which only one
+    executor lists — keep resolving exactly as before.
+    """
+    if not executors:
+        return None
+    # ``max`` returns the first maximal element, so on equal specificity the
+    # candidate that appeared first in iteration order wins (stable tie-break).
+    return max(
+        executors,
+        key=lambda executor: _filter_specificity(executor.model_registry.hf_model_filter),
+    )
+
+
 class ExecutorRegistry:
     def __init__(self, config: Config) -> None:
         self._exit_stack = contextlib.ExitStack()
@@ -279,6 +325,7 @@ class ExecutorRegistry:
         raise ValueError(f"Model '{model_id}' not found")
 
     def _find_executor_for_model(self, model_id: str) -> Executor | None:
+        candidates: list[Executor] = []
         for executor in self.all_executors():
             try:
                 ids = {m.id for m in executor.model_registry.list_local_models()}
@@ -287,8 +334,8 @@ class ExecutorRegistry:
             except (OSError, ValueError):
                 continue
             if model_id in ids:
-                return executor
-        return None
+                candidates.append(executor)
+        return _select_most_specific_executor(candidates)
 
     def resolve_tts_model_manager(self, model_id: str) -> SpeechHandler:
         cached = self._tts_cache.get(model_id)
@@ -298,6 +345,7 @@ class ExecutorRegistry:
             cached = self._tts_cache.get(model_id)
             if cached is not None:
                 return cached
+            candidates: list[Executor] = []
             for executor in self.text_to_speech:
                 try:
                     model_ids = [m.id for m in executor.model_registry.list_local_models()]
@@ -307,9 +355,12 @@ class ExecutorRegistry:
                     logger.debug(f"Failed to list models for executor '{executor.name}', skipping")
                     continue
                 if model_id in model_ids:
-                    self._tts_cache[model_id] = executor.model_manager
-                    return executor.model_manager
-            raise ValueError(f"No TTS executor found for model '{model_id}'")
+                    candidates.append(executor)
+            executor = _select_most_specific_executor(candidates)
+            if executor is None:
+                raise ValueError(f"No TTS executor found for model '{model_id}'")
+            self._tts_cache[model_id] = executor.model_manager
+            return executor.model_manager
 
     def resolve_stt_model_manager(self, model_id: str) -> TranscriptionHandler:
         cached = self._stt_cache.get(model_id)
