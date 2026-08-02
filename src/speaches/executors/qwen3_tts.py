@@ -34,42 +34,52 @@ try:
     # The fix has to be at the call site, so we rewrite the original __init__
     # source: replace `**kwargs,` in the `_patch_mistral_regex(...)` call with
     # a filtered spread that excludes `fix_mistral_regex`.
-    from transformers import tokenization_utils_tokenizers as _ttk
+    #
+    # The patch targets a transformers 5.x-only submodule. On transformers < 5.x
+    # (e.g. 4.57.3, which qwen-tts pins), the submodule and the bug are both
+    # absent, so the patch is unnecessary and must not abort the import guard.
+    try:
+        from transformers import tokenization_utils_tokenizers as _ttk
 
-    _BACKEND_CLS = _ttk.TokenizersBackend
-    if not getattr(_BACKEND_CLS.__init__, "_speaches_patched", False):
-        import inspect as _inspect
-        import textwrap as _textwrap
+        _BACKEND_CLS = _ttk.TokenizersBackend
+        if not getattr(_BACKEND_CLS.__init__, "_speaches_patched", False):
+            import inspect as _inspect
+            import textwrap as _textwrap
 
-        _orig_src = _textwrap.dedent(_inspect.getsource(_BACKEND_CLS.__init__))
-        _needle = 'fix_mistral_regex=kwargs.get("fix_mistral_regex"),\n            **kwargs,'
-        _replacement = (
-            'fix_mistral_regex=kwargs.get("fix_mistral_regex"),\n'
-            '            **{_k: _v for _k, _v in kwargs.items() if _k != "fix_mistral_regex"},'
+            _orig_src = _textwrap.dedent(_inspect.getsource(_BACKEND_CLS.__init__))
+            _needle = 'fix_mistral_regex=kwargs.get("fix_mistral_regex"),\n            **kwargs,'
+            _replacement = (
+                'fix_mistral_regex=kwargs.get("fix_mistral_regex"),\n'
+                '            **{_k: _v for _k, _v in kwargs.items() if _k != "fix_mistral_regex"},'
+            )
+            if _needle in _orig_src:
+                _patched_src = _orig_src.replace(_needle, _replacement, 1)
+                # `super()` without args needs a `__class__` cell, which is only created
+                # inside a class body. Exec'd free functions don't get one, so rewrite
+                # the zero-arg `super()` to an explicit two-arg call bound to the class.
+                _patched_src = _patched_src.replace(
+                    "super().__init__(**kwargs)",
+                    "super(_SpeachesBackendCls, self).__init__(**kwargs)",
+                    1,
+                )
+                _patched_src = _patched_src.replace("def __init__(self", "def _speaches_patched_init(self", 1)
+                _ns: dict[str, Any] = {"_SpeachesBackendCls": _BACKEND_CLS}
+                exec(  # noqa: S102
+                    compile(_patched_src, "<speaches qwen3_tts patched __init__>", "exec"),
+                    {**_ttk.__dict__, "_SpeachesBackendCls": _BACKEND_CLS},
+                    _ns,
+                )
+                _ns["_speaches_patched_init"]._speaches_patched = True  # noqa: SLF001
+                _BACKEND_CLS.__init__ = _ns["_speaches_patched_init"]  # type: ignore[method-assign]
+            else:
+                logging.getLogger(__name__).warning(
+                    "Qwen3-TTS: could not apply TokenizersBackend init patch; mistral-regex warning expected"
+                )
+    except ImportError:
+        logging.getLogger(__name__).info(
+            "Qwen3-TTS: transformers.TokenizersBackend patch skipped "
+            "(transformers < 5.x; the mistral-regex bug is absent there)."
         )
-        if _needle in _orig_src:
-            _patched_src = _orig_src.replace(_needle, _replacement, 1)
-            # `super()` without args needs a `__class__` cell, which is only created
-            # inside a class body. Exec'd free functions don't get one, so rewrite
-            # the zero-arg `super()` to an explicit two-arg call bound to the class.
-            _patched_src = _patched_src.replace(
-                "super().__init__(**kwargs)",
-                "super(_SpeachesBackendCls, self).__init__(**kwargs)",
-                1,
-            )
-            _patched_src = _patched_src.replace("def __init__(self", "def _speaches_patched_init(self", 1)
-            _ns: dict[str, Any] = {"_SpeachesBackendCls": _BACKEND_CLS}
-            exec(  # noqa: S102
-                compile(_patched_src, "<speaches qwen3_tts patched __init__>", "exec"),
-                {**_ttk.__dict__, "_SpeachesBackendCls": _BACKEND_CLS},
-                _ns,
-            )
-            _ns["_speaches_patched_init"]._speaches_patched = True  # noqa: SLF001
-            _BACKEND_CLS.__init__ = _ns["_speaches_patched_init"]  # type: ignore[method-assign]
-        else:
-            logging.getLogger(__name__).warning(
-                "Qwen3-TTS: could not apply TokenizersBackend init patch; mistral-regex warning expected"
-            )
 
     from qwen_tts import Qwen3TTSModel
 
