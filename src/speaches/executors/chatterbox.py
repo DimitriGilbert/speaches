@@ -184,9 +184,11 @@ if CHATTERBOX_AVAILABLE:
                 tts_any = cast("Any", tts)
                 start = time.perf_counter()
                 if clone_path is not None:
-                    audio, sr = tts_any.generate(request.text, audio_prompt_path=str(clone_path))
+                    audio = tts_any.generate(request.text, audio_prompt_path=str(clone_path))
                 else:
-                    audio, sr = tts_any.generate(request.text)
-                yield Audio(audio.cpu().numpy().astype(np.float32), sample_rate=sr)
+                    audio = tts_any.generate(request.text)
+                # Chatterbox.generate() returns a single torch.Tensor (shape
+                # (1, N)); the sample rate lives on the model as `sr`.
+                yield Audio(audio.cpu().numpy().astype(np.float32), sample_rate=tts_any.sr)
 
             logger.info(f"Generated audio for {len(request.text)} characters in {time.perf_counter() - start}s")

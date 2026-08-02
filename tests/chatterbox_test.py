@@ -46,14 +46,17 @@ class _FakeChatterboxTTS:
 
     last_generate_kwargs: dict | None = None
 
+    # The real ChatterboxTTS exposes the sample rate as `sr` (generate() returns
+    # only the audio tensor, not a (audio, sr) tuple).
+    sr = EXPECTED_SAMPLE_RATE
+
     @classmethod
     def from_pretrained(cls, device: str = "cpu") -> _FakeChatterboxTTS:  # noqa: ARG003
         return cls()
 
-    def generate(self, text: str, audio_prompt_path: str | None = None) -> tuple[_FakeTensor, int]:
+    def generate(self, text: str, audio_prompt_path: str | None = None) -> _FakeTensor:
         type(self).last_generate_kwargs = {"text": text, "audio_prompt_path": audio_prompt_path}
-        audio = _FakeTensor(np.zeros(100, dtype=np.float32))
-        return audio, EXPECTED_SAMPLE_RATE
+        return _FakeTensor(np.zeros(100, dtype=np.float32))
 
 
 @pytest.fixture(autouse=True)
