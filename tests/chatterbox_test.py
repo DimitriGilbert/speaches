@@ -92,11 +92,20 @@ def chatterbox_executor() -> Generator[tuple[types.ModuleType, type]]:
     """
     # ``ModuleType`` is what ``sys.modules`` expects; attribute assignment on it
     # is normal at runtime but pyrefly can't see the synthetic attributes.
+    # A bare ``ModuleType`` has ``__spec__ = None``, which makes the executor's
+    # ``importlib.util.find_spec("chatterbox")`` raise ``ValueError`` (and even
+    # if caught, return None). Set a dummy spec on each fake so the lazy-import
+    # availability probe succeeds against the injected modules.
+    import importlib.util
+
     fake_pkg = types.ModuleType("chatterbox")
+    fake_pkg.__spec__ = importlib.util.spec_from_loader("chatterbox", loader=None)
     fake_pkg.ChatterboxMultilingualTTS = _FakeChatterboxTTS  # type: ignore[missing-attribute]
     fake_tts = types.ModuleType("chatterbox.tts")
+    fake_tts.__spec__ = importlib.util.spec_from_loader("chatterbox.tts", loader=None)
     fake_tts.ChatterboxTTS = _FakeChatterboxTTS  # type: ignore[missing-attribute]
     fake_turbo = types.ModuleType("chatterbox.tts_turbo")
+    fake_turbo.__spec__ = importlib.util.spec_from_loader("chatterbox.tts_turbo", loader=None)
     fake_turbo.ChatterboxTurboTTS = _FakeChatterboxTTS  # type: ignore[missing-attribute]
     fake_pkg.tts = fake_tts  # type: ignore[missing-attribute]
     fake_pkg.tts_turbo = fake_turbo  # type: ignore[missing-attribute]

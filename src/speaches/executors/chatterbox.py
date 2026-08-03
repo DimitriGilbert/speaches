@@ -3,7 +3,7 @@ import logging
 import pathlib
 import threading
 import time
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import huggingface_hub
 import numpy as np
@@ -23,11 +23,16 @@ from speaches.model_registry import ModelRegistry
 from speaches.tracing import traced_generator
 
 try:
-    import os
+    # Lazy import: probe for chatterbox via metadata only (no module execution)
+    # so the heavy native deps (torch + transformers + diffusers) are not pulled
+    # into RSS at process startup. The heavy `from chatterbox.* import *` calls
+    # are deferred to `_load_fn`, which runs only when a model actually loads.
+    import importlib.util
 
-    from chatterbox import ChatterboxMultilingualTTS
-    from chatterbox.tts import ChatterboxTTS
-    from chatterbox.tts_turbo import ChatterboxTurboTTS
+    if importlib.util.find_spec("chatterbox") is None:
+        raise ImportError("chatterbox not installed")
+
+    import os
 
     # Imported before ctranslate2 to avoid an OpenMP segfault; also used below
     # to pin the thread count for the CPU-bound T3/VE autoregressive sampling.
@@ -40,6 +45,11 @@ try:
     CHATTERBOX_AVAILABLE = True
 except ImportError:
     CHATTERBOX_AVAILABLE = False
+
+if TYPE_CHECKING:
+    # Type-only import so the deferred `"ChatterboxTTS"` annotations below
+    # resolve for static analysis. Never imported at runtime (lazy: see `_load_fn`).
+    from chatterbox.tts import ChatterboxTTS
 
 SAMPLE_RATE = 24000
 LIBRARY_NAME = "chatterbox"
@@ -216,9 +226,15 @@ if CHATTERBOX_AVAILABLE:
             # share from_pretrained(device=...) and a generate(text, ...,
             # audio_prompt_path=...) clone API, so one manager covers them.
             if model_id in MULTILINGUAL_MODEL_IDS:
+                from chatterbox import ChatterboxMultilingualTTS
+
                 return ChatterboxMultilingualTTS.from_pretrained(device="cpu")
             if model_id in TURBO_MODEL_IDS:
+                from chatterbox.tts_turbo import ChatterboxTurboTTS
+
                 return ChatterboxTurboTTS.from_pretrained(device="cpu")
+            from chatterbox.tts import ChatterboxTTS
+
             return ChatterboxTTS.from_pretrained(device="cpu")
 
         def _clone_path_for_voice(self, voice: str) -> pathlib.Path | None:

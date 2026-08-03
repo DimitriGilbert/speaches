@@ -3,7 +3,7 @@ import logging
 import pathlib
 import threading
 import time
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import huggingface_hub
 import numpy as np
@@ -24,6 +24,15 @@ from speaches.model_registry import ModelRegistry
 from speaches.tracing import traced_generator
 
 try:
+    # Lazy import: probe for f5_tts via metadata only (no module execution) so
+    # the heavy native deps (torch + the F5TTS pipeline) are not pulled into
+    # RSS at process startup. The heavy `from f5_tts.api import F5TTS` is
+    # deferred to `_load_fn`, which runs only when an F5 model actually loads.
+    import importlib.util
+
+    if importlib.util.find_spec("f5_tts") is None:
+        raise ImportError("f5_tts not installed")
+
     import os
 
     # Imported before the F5TTS pipeline so the OpenMP-backed torch ops it
@@ -33,11 +42,14 @@ try:
 
     torch.set_num_threads(os.cpu_count() or 1)
 
-    from f5_tts.api import F5TTS
-
     F5_TTS_AVAILABLE = True
 except ImportError:
     F5_TTS_AVAILABLE = False
+
+if TYPE_CHECKING:
+    # Type-only import so the deferred `"F5TTS"` annotations below resolve for
+    # static analysis. Never imported at runtime (lazy: see `_load_fn`).
+    from f5_tts.api import F5TTS
 
 SAMPLE_RATE = 24000
 LIBRARY_NAME = "f5-tts"
@@ -168,6 +180,8 @@ if F5_TTS_AVAILABLE:
             # model_id is unused: F5TTS downloads its own weights (F5TTS_v1_Base
             # from SWivid/F5-TTS, plus the charactr/vocos-mel-24khz vocoder) on
             # construction, so there is no per-repo from_pretrained to dispatch.
+            from f5_tts.api import F5TTS  # lazy: only imported when a model loads
+
             return F5TTS(model="F5TTS_v1_Base", device="cpu")
 
         def _clone_path_for_voice(self, voice: str) -> pathlib.Path | None:
